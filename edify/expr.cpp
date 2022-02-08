@@ -340,6 +340,7 @@ void RegisterBuiltins() {
 
     RegisterFunction("less_than_int", LessThanIntFn);
     RegisterFunction("greater_than_int", GreaterThanIntFn);
+    RegisterFunction("LogicalOr", LogicalOrFn);
 }
 
 

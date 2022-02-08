@@ -107,6 +107,106 @@ Value* UIPrintFn(const char* name, State* state, const std::vector<std::unique_p
   return StringValue(buffer);
 }
 
+// package_extract_file_compatible(package_file[, dest_file])
+//   Extracts a single package_file from the update package and writes it to dest_file,
+//   overwriting existing files if necessary. Without the dest_file argument, returns the
+//   contents of the package file as a binary blob.
+// the format of arguement is (file_name0, device_dir0, file_name1, device_dir1, ...)
+Value* PackageExtractFileCompatibleFn(const char* name, State* state,
+                            const std::vector<std::unique_ptr<Expr>>& argv) {
+  if (argv.size()%2 != 0) {
+    return ErrorAbort(state, kArgsParsingFailure, "%s() expects multiple of 2 args, got %zu", name,argv.size());
+  }
+
+  if (argv.size()%2 == 0) {
+    // The two-argument version extracts to a file.
+    std::vector<std::string> args;
+    if (!ReadArgs(state, argv, &args)) {
+      return ErrorAbort(state, kArgsParsingFailure, "%s() Failed to parse %zu args", name,
+                        argv.size());
+    }
+    //judge the device type between ufs and emmc
+    int anchor_device = -1;
+    for(int index = 1; index<argv.size(); index += 2){
+      if(open(args[index].c_str(), O_WRONLY|O_CREAT|O_TRUNC, S_IRUSR|S_IWUSR) > 0){
+        anchor_device = index;
+		break;
+      }
+    }
+    if(anchor_device > -1 && anchor_device < argv.size()){
+      const std::string& zip_path = args[anchor_device-1];
+      const std::string& dest_path = args[anchor_device];
+
+      ZipArchiveHandle za = static_cast<UpdaterInfo*>(state->cookie)->package_zip;
+      ZipString zip_string_path(zip_path.c_str());
+      ZipEntry entry;
+      if (FindEntry(za, zip_string_path, &entry) != 0) {
+        LOG(ERROR) << name << ": no " << zip_path << " in package";
+        return StringValue("");
+      }
+
+      android::base::unique_fd fd(TEMP_FAILURE_RETRY(
+          open(dest_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR)));
+      if (fd == -1) {
+        PLOG(ERROR) << name << ": can't open " << dest_path << " for write";
+        return StringValue("");
+      }
+
+      bool success = true;
+      int32_t ret = ExtractEntryToFile(za, &entry, fd);
+      if (ret != 0) {
+        LOG(ERROR) << name << ": Failed to extract entry \"" << zip_path << "\" ("
+                 << entry.uncompressed_length << " bytes) to \"" << dest_path
+                 << "\": " << ErrorCodeString(ret);
+        success = false;
+      }
+      if (fsync(fd) == -1) {
+        PLOG(ERROR) << "fsync of \"" << dest_path << "\" failed";
+        success = false;
+      }
+
+      if (close(fd.release()) != 0) {
+        PLOG(ERROR) << "close of \"" << dest_path << "\" failed";
+        success = false;
+     }
+
+      return StringValue(success ? "t" : "");
+    }else{
+      return ErrorAbort(state, kArgsParsingFailure, "%s(): Failed to find right device directory to write", name);
+    }
+  } else {
+    // The one-argument version returns the contents of the file as the result.
+
+    std::vector<std::string> args;
+    if (!ReadArgs(state, argv, &args)) {
+      return ErrorAbort(state, kArgsParsingFailure, "%s() Failed to parse %zu args", name,
+                        argv.size());
+    }
+    const std::string& zip_path = args[0];
+
+    ZipArchiveHandle za = static_cast<UpdaterInfo*>(state->cookie)->package_zip;
+    ZipString zip_string_path(zip_path.c_str());
+    ZipEntry entry;
+    if (FindEntry(za, zip_string_path, &entry) != 0) {
+      return ErrorAbort(state, kPackageExtractFileFailure, "%s(): no %s in package", name,
+                        zip_path.c_str());
+    }
+
+    std::string buffer;
+    buffer.resize(entry.uncompressed_length);
+
+    int32_t ret =
+        ExtractToMemory(za, &entry, reinterpret_cast<uint8_t*>(&buffer[0]), buffer.size());
+    if (ret != 0) {
+      return ErrorAbort(state, kPackageExtractFileFailure,
+                        "%s: Failed to extract entry \"%s\" (%zu bytes) to memory: %s", name,
+                        zip_path.c_str(), buffer.size(), ErrorCodeString(ret));
+    }
+
+    return new Value(Value::Type::BLOB, buffer);
+  }
+}
+
 // package_extract_file(package_file[, dest_file])
 //   Extracts a single package_file from the update package and writes it to dest_file,
 //   overwriting existing files if necessary. Without the dest_file argument, returns the
@@ -917,6 +1017,7 @@ void RegisterInstallFunctions() {
   RegisterFunction("show_progress", ShowProgressFn);
   RegisterFunction("set_progress", SetProgressFn);
   RegisterFunction("package_extract_file", PackageExtractFileFn);
+  RegisterFunction("package_extract_file_compatible",PackageExtractFileCompatibleFn);
 
   RegisterFunction("getprop", GetPropFn);
   RegisterFunction("file_getprop", FileGetPropFn);
